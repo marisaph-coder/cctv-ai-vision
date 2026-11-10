@@ -1,0 +1,7 @@
+venv/
+known_faces/
+*.jpg
+*.jpeg
+*.png
+*.rar
+runs/
