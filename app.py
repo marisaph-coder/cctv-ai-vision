@@ -139,6 +139,16 @@ def get_current_week_str():
     year, week_num, _ = now.isocalendar()
     return f"{year}-W{week_num:02d}"
 
+def get_current_date_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d")
+
+# ตัวแปรสถิติรายวัน 24 ชั่วโมง (Reset ทุกเที่ยงคืน)
+daily_stats = {
+    "date": get_current_date_str(),
+    "person_in": 0,
+    "person_out": 0
+}
+
 weekly_stats = {
     "week": get_current_week_str(),
     "person_in": 0,
@@ -199,6 +209,7 @@ def load_known_faces():
 load_known_faces()
 
 def analyze_unrecognized_reason(face_bgr):
+    """ วิเคราะห์สาเหตุที่ไม่สามารถระบุตัวตนใบหน้าได้ """
     h, w = face_bgr.shape[:2]
     if w < 45 or h < 45:
         return "Unknown (ใบหน้าเล็ก/ไกล)"
@@ -228,7 +239,7 @@ def recognize_face(face_bgr):
     max_score = 0.0
     for template_hist, name in zip(known_face_hists, known_face_names):
         score = cv2.compareHist(hist_face, template_hist, cv2.HISTCMP_CORREL)
-        if score > 0.65 and score > max_score:
+        if score > 0.78 and score > max_score:
             max_score = score
             best_match_name = name
 
@@ -251,14 +262,59 @@ def is_intersecting(p1, p2, p3, p4):
         return True
     return False
 
-def save_weekly_report_to_csv(target_week, stats_data):
-    csv_file_path = os.path.join(REPORT_DIR, f"weekly_summary_{target_week}.csv")
+# ==========================================
+# CSV REPORT GENERATOR (DAILY & WEEKLY)
+# ==========================================
+def save_daily_report_to_csv(target_date):
+    """ สร้างไฟล์ CSV สรุปสถิติจำนวนการเข้า-ออก ประจำวัน (24 ชม.) แยกตามรายชื่อบุคคล """
+    csv_file_path = os.path.join(REPORT_DIR, f"person_summary_daily_{target_date}.csv")
+    
     with open(csv_file_path, mode='w', newline='', encoding='utf-8-sig') as f:
+        f.write("sep=,\n")
         writer = csv.writer(f)
-        writer.writerow(["สัปดาห์ (Week)", "คนเข้า (Person IN)", "คนออก (Person OUT)", "รวมคนทั้งหมด"])
-        total_p = stats_data["person_in"] + stats_data["person_out"]
+        
         writer.writerow([
-            target_week, stats_data["person_in"], stats_data["person_out"], total_p
+            "ชื่อบุคคล / สถานะระบุตัวตน", 
+            "เข้าวันนี้ (IN)", 
+            "ออกวันนี้ (OUT)", 
+            "รวมจำนวนเข้า-ออกวันนี้", 
+            "วันที่ (Date)"
+        ])
+        
+        person_counts = {}
+        with data_lock:
+            for log in visit_logs:
+                display_name = log.get("display_name", log.get("name", "Unknown"))
+                direction = log.get("direction", "")
+                
+                if display_name not in person_counts:
+                    person_counts[display_name] = {"IN": 0, "OUT": 0}
+                
+                if direction in ["IN", "OUT"]:
+                    person_counts[display_name][direction] += 1
+
+        for name, counts in person_counts.items():
+            in_count = counts["IN"]
+            out_count = counts["OUT"]
+            total_today = in_count + out_count
+            
+            writer.writerow([
+                name,
+                f"{in_count} ครั้ง",
+                f"{out_count} ครั้ง",
+                f"{total_today} ครั้ง",
+                target_date
+            ])
+
+        total_p_in = daily_stats.get("person_in", 0)
+        total_p_out = daily_stats.get("person_out", 0)
+        writer.writerow([])
+        writer.writerow([
+            "--- สรุปรวมประจำวัน ---",
+            f"{total_p_in} ครั้ง",
+            f"{total_p_out} ครั้ง",
+            f"{total_p_in + total_p_out} ครั้ง",
+            target_date
         ])
 
 def archive_old_captures_to_drive_d():
@@ -281,15 +337,18 @@ def archive_old_captures_to_drive_d():
     except Exception as e:
         print(f"[Archive Error] {e}")
 
-def check_and_reset_weekly_stats():
-    global weekly_stats, total_in, total_out, armed_ids, counted_ids, tracked_positions, visit_logs, last_known_names
+def check_and_reset_stats():
+    """ ตรวจสอบการเปลี่ยนวัน (24 ชม. เที่ยงคืน reset 1 ใหม่) และเปลี่ยนสัปดาห์ """
+    global daily_stats, weekly_stats, total_in, total_out, armed_ids, counted_ids, tracked_positions, visit_logs, last_known_names
+    current_date = get_current_date_str()
     current_week = get_current_week_str()
     archive_old_captures_to_drive_d()
 
     with data_lock:
-        if current_week != weekly_stats["week"]:
-            save_weekly_report_to_csv(weekly_stats["week"], weekly_stats)
-            weekly_stats = {"week": current_week, "person_in": 0, "person_out": 0}
+        # 1. Reset รายวัน เมื่อผ่านเที่ยงคืน (24 ชม.)
+        if current_date != daily_stats["date"]:
+            save_daily_report_to_csv(daily_stats["date"])
+            daily_stats = {"date": current_date, "person_in": 0, "person_out": 0}
             total_in = 0
             total_out = 0
             visit_logs.clear()
@@ -297,6 +356,10 @@ def check_and_reset_weekly_stats():
             counted_ids.clear()
             tracked_positions.clear()
             last_known_names.clear()
+
+        # 2. Reset สัปดาห์
+        if current_week != weekly_stats["week"]:
+            weekly_stats = {"week": current_week, "person_in": 0, "person_out": 0}
 
 class RTSPVideoWriter:
     def __init__(self, src):
@@ -356,13 +419,13 @@ def generate_raw_frames():
 
 def generate_frames():
     global face_count, person_count, total_in, total_out, visit_logs, is_paused
-    global line1_coords, line2_coords, tracked_positions, armed_ids, counted_ids, weekly_stats
+    global line1_coords, line2_coords, tracked_positions, armed_ids, counted_ids, daily_stats, weekly_stats
     global frame_count, frame_skip_interval, last_known_names, last_draw_boxes
 
     target_classes = [PERSON_CLASS_ID]
 
     while True:
-        check_and_reset_weekly_stats()
+        check_and_reset_stats()
 
         if is_paused:
             time.sleep(0.1)
@@ -388,14 +451,6 @@ def generate_frames():
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 rgb_color = (color[2], color[1], color[0])
                 frame = draw_text_pil(frame, display_label, position=(x1, max(5, y1 - 25)), font_size=16, color=rgb_color)
-
-            cv2.line(frame, l1_start, l1_end, (0, 140, 255), 3)
-            cv2.circle(frame, l1_start, 6, (0, 140, 255), -1)
-            cv2.circle(frame, l1_end, 6, (0, 140, 255), -1)
-
-            cv2.line(frame, l2_start, l2_end, (0, 255, 255), 2)
-            cv2.circle(frame, l2_start, 5, (0, 255, 255), -1)
-            cv2.circle(frame, l2_end, 5, (0, 255, 255), -1)
 
             display_frame = cv2.resize(frame, (960, 540))
             ret, buffer = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
@@ -438,29 +493,24 @@ def generate_frames():
 
                 if cls_id == PERSON_CLASS_ID:
                     current_persons += 1
-                    if track_id in last_known_names:
-                        label_name = last_known_names[track_id]
-                    else:
-                        person_crop = frame[max(0, y1):min(frame_h, y2), max(0, x1):min(frame_w, x2)]
-                        if person_crop.size > 0:
-                            gray_crop = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
-                            faces = face_cascade.detectMultiScale(
-                                gray_crop, 
-                                scaleFactor=1.1, 
-                                minNeighbors=3, 
-                                minSize=(25, 25)
-                            )
-                            if len(faces) > 0:
-                                current_faces += 1
-                                fx, fy, fw, fh = faces[0]
-                                face_crop = person_crop[fy:fy + fh, fx:fx + fw]
-                                if face_crop.size > 0:
-                                    name, _ = recognize_face(face_crop)
-                                    label_name = name
-                                    if "Unknown" not in name:
-                                        last_known_names[track_id] = name
-                            else:
-                                label_name = "Unknown (ก้มหน้า/หันข้าง)"
+                    person_crop = frame[max(0, y1):min(frame_h, y2), max(0, x1):min(frame_w, x2)]
+                    if person_crop.size > 0:
+                        gray_crop = cv2.cvtColor(person_crop, cv2.COLOR_BGR2GRAY)
+                        faces = face_cascade.detectMultiScale(
+                            gray_crop, 
+                            scaleFactor=1.1, 
+                            minNeighbors=3, 
+                            minSize=(25, 25)
+                        )
+                        if len(faces) > 0:
+                            current_faces += 1
+                            fx, fy, fw, fh = faces[0]
+                            face_crop = person_crop[fy:fy + fh, fx:fx + fw]
+                            if face_crop.size > 0:
+                                name, score = recognize_face(face_crop)
+                                label_name = name
+                        else:
+                            label_name = "Unknown (ก้มหน้า/เอียงหน้า)"
 
                 with data_lock:
                     if track_id in tracked_positions:
@@ -476,15 +526,17 @@ def generate_frames():
                                     cp = cross_product(l2_start, l2_end, curr_pos)
                                     if cp > 0:
                                         total_in += 1
+                                        daily_stats["person_in"] += 1
                                         weekly_stats["person_in"] += 1
                                         log_visit(label_name, "IN", clean_frame)
                                     else:
                                         total_out += 1
+                                        daily_stats["person_out"] += 1
                                         weekly_stats["person_out"] += 1
                                         log_visit(label_name, "OUT", clean_frame)
 
                                     counted_ids.add(track_id)
-                                    save_weekly_report_to_csv(weekly_stats["week"], weekly_stats)
+                                    save_daily_report_to_csv(daily_stats["date"])
 
                     tracked_positions[track_id] = {"pos": curr_pos, "label": label_name}
 
@@ -514,14 +566,6 @@ def generate_frames():
             person_count = current_persons
             face_count = current_faces
 
-        cv2.line(frame, l1_start, l1_end, (0, 140, 255), 3)
-        cv2.circle(frame, l1_start, 6, (0, 140, 255), -1)
-        cv2.circle(frame, l1_end, 6, (0, 140, 255), -1)
-
-        cv2.line(frame, l2_start, l2_end, (0, 255, 255), 2)
-        cv2.circle(frame, l2_start, 5, (0, 255, 255), -1)
-        cv2.circle(frame, l2_end, 5, (0, 255, 255), -1)
-
         display_frame = cv2.resize(frame, (960, 540))
         ret, buffer = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
         yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer.tobytes() + b"\r\n")
@@ -537,7 +581,7 @@ def auto_clean_old_captures():
                     if os.path.isdir(item_path) and item.startswith("captures_"):
                         if (now - os.path.getmtime(item_path)) > retention_period:
                             shutil.rmtree(item_path)
-                    elif os.path.isfile(item_path) and item.startswith("weekly_summary_") and item.endswith(".csv"):
+                    elif os.path.isfile(item_path) and (item.startswith("person_summary_") or item.startswith("weekly_summary_")) and item.endswith(".csv"):
                         if (now - os.path.getmtime(item_path)) > retention_period:
                             os.remove(item_path)
         except Exception as e:
@@ -556,14 +600,14 @@ def log_visit(name, direction, frame):
     display_name = name
     if clean_name in ["Unknown", "Person"]:
         unk_num = sum(1 for item in visit_logs if clean_name in item["display_name"]) + 1
-        display_name = f"{clean_name}_{unk_num}"
+        reason = ""
         if "(" in name:
-            reason = name.split("(")[1].replace(")", "")
-            display_name += f" ({reason})"
+            reason = f" ({name.split('(')[1].replace(')', '')})"
+        display_name = f"{clean_name}_{unk_num}{reason}"
+
     filename_only = f"{direction}_{timestamp_file}.jpg"
 
     saved_frame = frame.copy()
-    
     cv2.rectangle(saved_frame, (10, 10), (750, 48), (0, 0, 0), -1)
     stamp_text = f"{date_time_display} | [{direction}] {display_name}"
     saved_frame = draw_text_pil(saved_frame, stamp_text, position=(20, 15), font_size=20, color=(255, 255, 0))
@@ -695,15 +739,25 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="flex flex-col gap-4">
+            <!-- คลิกเพื่อดูรายชื่อพนักงานที่ผ่านเข้า-ออก ประจำวัน 24 ชม. -->
             <div class="grid grid-cols-2 gap-3.5">
-                <a href="/gallery?filter=IN" class="cyber-card p-4 rounded-3xl border-emerald-500/30 bg-emerald-500/5 block">
-                    <span class="text-[10px] font-black text-emerald-400 uppercase">PERSON IN</span>
+                <div onclick="openPersonListModal('IN')" class="cyber-card p-4 rounded-3xl border-emerald-500/30 bg-emerald-500/5 cursor-pointer hover:bg-emerald-500/10 transition group">
+                    <div class="flex justify-between items-center">
+                        <span class="text-[10px] font-black text-emerald-400 uppercase">PERSON IN (24h)</span>
+                        <i class="fa-solid fa-circle-info text-emerald-400 text-xs opacity-70 group-hover:opacity-100"></i>
+                    </div>
                     <div class="text-4xl font-mono font-black text-emerald-400 mt-2" id="total-in">0</div>
-                </a>
-                <a href="/gallery?filter=OUT" class="cyber-card p-4 rounded-3xl border-rose-500/30 bg-rose-500/5 block">
-                    <span class="text-[10px] font-black text-rose-400 uppercase">PERSON OUT</span>
+                    <span class="text-[9px] text-slate-400 mt-1 block">คลิกเพื่อดูรายชื่อทั้งหมด</span>
+                </div>
+
+                <div onclick="openPersonListModal('OUT')" class="cyber-card p-4 rounded-3xl border-rose-500/30 bg-rose-500/5 cursor-pointer hover:bg-rose-500/10 transition group">
+                    <div class="flex justify-between items-center">
+                        <span class="text-[10px] font-black text-rose-400 uppercase">PERSON OUT (24h)</span>
+                        <i class="fa-solid fa-circle-info text-rose-400 text-xs opacity-70 group-hover:opacity-100"></i>
+                    </div>
                     <div class="text-4xl font-mono font-black text-rose-400 mt-2" id="total-out">0</div>
-                </a>
+                    <span class="text-[9px] text-slate-400 mt-1 block">คลิกเพื่อดูรายชื่อทั้งหมด</span>
+                </div>
             </div>
 
             <div class="cyber-card p-4 rounded-3xl border-slate-800">
@@ -728,7 +782,7 @@ HTML_TEMPLATE = """
                 <div class="h-44 overflow-y-auto pr-1">
                     <table class="w-full text-left text-[11px] font-mono">
                         <thead class="text-slate-500 text-[9px] uppercase border-b border-slate-800/50 sticky top-0 bg-slate-900/95">
-                            <tr><th class="py-1">เวลา</th><th class="py-1">ทิศทาง</th><th class="py-1">รายละเอียด / สาเหตุ</th></tr>
+                            <tr><th class="py-1">เวลา</th><th class="py-1">ทิศทาง</th><th class="py-1">รายละเอียด / สาเหตุที่ไม่พบชื่อ</th></tr>
                         </thead>
                         <tbody id="log-table-body" class="divide-y divide-slate-800/40 text-slate-300">
                             <tr><td colspan="3" class="text-center py-6 text-slate-600">ยังไม่มีรายการบันทึก...</td></tr>
@@ -749,6 +803,35 @@ HTML_TEMPLATE = """
         </div>
     </main>
 
+    <!-- MODAL: PERSON DETAIL LIST (24 HOUR LOG) -->
+    <div id="person-list-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-[80] hidden flex items-center justify-center p-4" onclick="closePersonListModal()">
+        <div class="cyber-card max-w-xl w-full rounded-3xl p-6 border border-slate-800 shadow-2xl relative" onclick="event.stopPropagation()">
+            <div class="flex justify-between items-center border-b border-slate-800 pb-3 mb-4">
+                <div>
+                    <h3 id="modal-person-title" class="text-base font-extrabold text-white">รายชื่อบุคคลที่เดินทางผ่าน (24 ชั่วโมงวันนี้)</h3>
+                    <p class="text-xs text-slate-400 mt-0.5">รีเซ็ตนับ 1 ใหม่ทุกเที่ยงคืน (00:00 น.)</p>
+                </div>
+                <button onclick="closePersonListModal()" class="text-slate-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="overflow-y-auto max-h-72 pr-1">
+                <table class="w-full text-left text-xs font-mono">
+                    <thead class="text-slate-400 uppercase text-[10px] bg-slate-950/80 border-b border-slate-800 sticky top-0">
+                        <tr>
+                            <th class="py-2.5 px-3">ชื่อบุคคล / เหตุผลที่ไม่ระบุตัวตน</th>
+                            <th class="py-2.5 px-3 text-center">ทิศทาง</th>
+                            <th class="py-2.5 px-3 text-center">เวลาสแกน</th>
+                            <th class="py-2.5 px-3 text-center">รูปอ้างอิง</th>
+                        </tr>
+                    </thead>
+                    <tbody id="person-list-table-body" class="divide-y divide-slate-800/50 text-slate-200">
+                        <tr><td colspan="4" class="text-center py-6 text-slate-500">กำลังโหลดข้อมูล...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <!-- MODAL: FACE MANAGER -->
     <div id="face-manager-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-[80] hidden flex items-center justify-center p-4" onclick="closeFaceManagerModal()">
         <div class="cyber-card max-w-lg w-full rounded-3xl p-6 border border-slate-800 shadow-2xl relative" onclick="event.stopPropagation()">
@@ -761,14 +844,15 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="bg-slate-950/70 p-4 rounded-2xl border border-slate-800 mb-4 space-y-3">
-                <h4 class="text-xs font-bold text-amber-300 uppercase"><i class="fa-solid fa-camera mr-1"></i> ลงทะเบียนใบหน้า (ถ่าย 3 รูปอัตโนมัติ)</h4>
+                <h4 class="text-xs font-bold text-amber-300 uppercase"><i class="fa-solid fa-camera mr-1"></i> ลงทะเบียนใบหน้า (ถ่าย 5 รูปอัตโนมัติ)</h4>
                 
                 <div class="relative aspect-video rounded-xl overflow-hidden bg-black border border-slate-800 flex items-center justify-center">
                     <img id="face-preview-stream" src="" class="w-full h-full object-cover rounded-xl">
-                    
-                    <div id="countdown-overlay" class="absolute inset-0 bg-black/60 backdrop-blur-xs hidden flex flex-col items-center justify-center text-center p-4">
-                        <span id="guide-instruction" class="text-amber-300 font-extrabold text-sm mb-2 uppercase tracking-wide">🔴 กำลังถ่ายรูปอัตโนมัติ...</span>
-                        <span id="countdown-num" class="text-6xl font-black text-rose-500 animate-pulse">3</span>
+                    <div id="snap-flash-overlay" class="absolute inset-0 bg-white opacity-0 pointer-events-none transition-opacity duration-150 z-20"></div>
+
+                    <div id="countdown-overlay" class="absolute inset-0 bg-black/60 backdrop-blur-xs hidden flex flex-col items-center justify-center text-center p-4 z-10">
+                        <span id="guide-instruction" class="text-amber-300 font-extrabold text-base mb-2 uppercase tracking-wide">🔴 กำลังถ่ายรูปอัตโนมัติ...</span>
+                        <span id="countdown-num" class="text-6xl font-black text-rose-500 animate-pulse">2</span>
                     </div>
                 </div>
 
@@ -778,7 +862,7 @@ HTML_TEMPLATE = """
 
                 <div class="grid grid-cols-2 gap-2">
                     <button type="button" id="snap-btn" onclick="startPhotoEnrollmentProcess()" class="bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-black py-2.5 rounded-xl text-xs transition flex items-center justify-center gap-1.5 shadow-lg active:scale-95 cursor-pointer">
-                        <i class="fa-solid fa-camera text-sm"></i> 📸 ถ่ายรูปภาพ (3 รูปอัตโนมัติ)
+                        <i class="fa-solid fa-camera text-sm"></i> 📸 ถ่ายรูปภาพ (5 รูปอัตโนมัติ)
                     </button>
                     <label class="bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold py-2.5 rounded-xl text-xs transition flex items-center justify-center gap-1.5 cursor-pointer border border-slate-700 active:scale-95">
                         <i class="fa-solid fa-upload"></i> อัปโหลดไฟล์รูป
@@ -850,6 +934,9 @@ HTML_TEMPLATE = """
 
         function drawOverlayLines() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // ถ้าไม่ใช่ Admin ให้ข้ามการวาดเส้นซ้อนบนหน้าจอ
+            if (userRole !== 'admin') return;
+
             const l1_px1 = line1.x1 * canvas.width, l1_py1 = line1.y1 * canvas.height, l1_px2 = line1.x2 * canvas.width, l1_py2 = line1.y2 * canvas.height;
             ctx.beginPath(); ctx.moveTo(l1_px1, l1_py1); ctx.lineTo(l1_px2, l1_py2);
             ctx.strokeStyle = '#f97316'; ctx.lineWidth = 3; ctx.stroke();
@@ -914,6 +1001,34 @@ HTML_TEMPLATE = """
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ line1: line1, line2: line2 })
             });
+        }
+
+        function openPersonListModal(filterDir) {
+            const modal = document.getElementById('person-list-modal');
+            const title = document.getElementById('modal-person-title');
+            title.innerText = filterDir === 'IN' ? 'รายชื่อบุคคลที่เดินเข้า (PERSON IN - 24 ชม.)' : 'รายชื่อบุคคลที่เดินออก (PERSON OUT - 24 ชม.)';
+            modal.classList.remove('hidden');
+
+            fetch('/get_visit_logs').then(res => res.json()).then(logs => {
+                const tbody = document.getElementById('person-list-table-body');
+                const filtered = logs.filter(l => l.direction === filterDir);
+                if (!filtered || filtered.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="4" class="text-center py-6 text-slate-500">ไม่มีรายการสแกนในทิศทางนี้</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = filtered.map(item => `
+                    <tr class="hover:bg-slate-800/40 transition">
+                        <td class="py-2.5 px-3 font-bold text-white">${item.display_name}</td>
+                        <td class="py-2.5 px-3 text-center"><span class="px-2 py-0.5 rounded text-[10px] font-bold ${item.direction === 'IN' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}">${item.direction}</span></td>
+                        <td class="py-2.5 px-3 text-center text-slate-400">${item.time}</td>
+                        <td class="py-2.5 px-3 text-center"><a href="/captures/${item.filename}" target="_blank" class="text-cyan-400 hover:underline"><i class="fa-solid fa-image mr-1"></i>ดูรูปถ่าย</a></td>
+                    </tr>
+                `).join('');
+            });
+        }
+
+        function closePersonListModal() {
+            document.getElementById('person-list-modal').classList.add('hidden');
         }
 
         function openFaceManagerModal() {
@@ -991,7 +1106,21 @@ HTML_TEMPLATE = """
             });
         }
 
-        // PHOTO ENROLLMENT PROCESS (3 PHOTOS WITH POSE GUIDANCE - STRICT SYNC)
+        function playBeepSound() {
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                osc.frequency.value = 880; 
+                gain.gain.value = 0.3;
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.15); 
+            } catch(e) {}
+        }
+
         async function startPhotoEnrollmentProcess() {
             const baseName = document.getElementById('person-name').value.trim();
             if (!baseName) {
@@ -1003,11 +1132,14 @@ HTML_TEMPLATE = """
             const guideEl = document.getElementById('guide-instruction');
             const numEl = document.getElementById('countdown-num');
             const snapBtn = document.getElementById('snap-btn');
+            const flashEl = document.getElementById('snap-flash-overlay');
 
             const poses = [
-                { label: "📸 รูปที่ 1/3: มองหน้าตรง" },
-                { label: "📸 รูปที่ 2/3: ค่อยๆ เอียงมองซ้าย" },
-                { label: "📸 รูปที่ 3/3: ค่อยๆ เอียงมองขวา" }
+                { label: "📸 รูปที่ 1/5: มองหน้าตรง 😐" },
+                { label: "📸 รูปที่ 2/5: ค่อยๆ หันหน้าไปทางซ้าย 👈" },
+                { label: "📸 รูปที่ 3/5: ค่อยๆ หันหน้าไปทางขวา 👉" },
+                { label: "📸 รูปที่ 4/5: เงยหน้าขึ้นเล็กน้อย 👆" },
+                { label: "📸 รูปที่ 5/5: ก้มหน้าลงเล็กน้อย 👇" }
             ];
 
             snapBtn.disabled = true;
@@ -1016,14 +1148,22 @@ HTML_TEMPLATE = """
             for (let i = 0; i < poses.length; i++) {
                 guideEl.innerText = poses[i].label;
 
-                for (let sec = 3; sec > 0; sec--) {
+                for (let sec = 2; sec > 0; sec--) {
                     numEl.innerText = sec;
                     await new Promise(r => setTimeout(r, 1000));
                 }
 
                 numEl.innerText = "⚡ แชะ!";
                 
-                // ส่งคำสั่งถ่ายรูปทีละ 1 รูป ไปให้ Backend เพื่อซิงค์ภาพให้ตรงกับจังหวะแชะพอดี
+                flashEl.classList.remove('opacity-0');
+                flashEl.classList.add('opacity-80');
+                playBeepSound();
+
+                setTimeout(() => {
+                    flashEl.classList.remove('opacity-80');
+                    flashEl.classList.add('opacity-0');
+                }, 150);
+
                 try {
                     await fetch('/api/enroll_single_photo', {
                         method: 'POST',
@@ -1045,7 +1185,7 @@ HTML_TEMPLATE = """
             snapBtn.disabled = false;
             document.getElementById('person-name').value = '';
             fetchKnownFacesList();
-            alert(`✅ บันทึกรูปถ่ายใบหน้าของ '${baseName}' ครบทั้ง 3 รูปเรียบร้อยแล้ว!`);
+            alert(`✅ บันทึกรูปถ่ายใบหน้าของ '${baseName}' ครบทั้ง 5 รูปเรียบร้อยแล้ว!`);
         }
 
         function uploadFaceFile() {
@@ -1142,7 +1282,7 @@ HTML_TEMPLATE = """
                     <tr class="hover:bg-slate-800/40 transition">
                         <td class="py-1.5 text-slate-400">${log.time}</td>
                         <td class="py-1.5"><span class="text-emerald-400 font-bold bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 rounded">${log.direction}</span></td>
-                        <td class="py-1.5 font-semibold text-slate-200 truncate max-w-[140px]">${log.display_name}</td>
+                        <td class="py-1.5 font-semibold text-slate-200 truncate max-w-[160px]">${log.display_name}</td>
                     </tr>
                 `).join('');
             });
@@ -1151,8 +1291,8 @@ HTML_TEMPLATE = """
         function fetchMetrics() {
             fetch('/get_count').then(res => res.json()).then(data => {
                 document.getElementById('person-count').innerText = data.person_count;
-                document.getElementById('total-in').innerText = data.weekly_stats.person_in;
-                document.getElementById('total-out').innerText = data.weekly_stats.person_out;
+                document.getElementById('total-in').innerText = data.daily_stats.person_in;
+                document.getElementById('total-out').innerText = data.daily_stats.person_out;
                 document.getElementById('all-captures-count').innerText = data.all_captures_count;
 
                 if (!isDrawing && data.line1_coords && data.line2_coords) {
@@ -1209,7 +1349,7 @@ SUMMARY_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>รายงานสรุปผลย้อนหลังรายสัปดาห์</title>
+    <title>รายงานสรุปผลย้อนหลังรายวัน/สัปดาห์</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -1219,8 +1359,8 @@ SUMMARY_TEMPLATE = """
     <div class="max-w-5xl mx-auto space-y-6">
         <div class="flex justify-between items-center border-b border-slate-800 pb-4">
             <div>
-                <h1 class="text-xl font-bold text-cyan-400"><i class="fa-solid fa-chart-pie mr-2"></i>รายงานสรุปผลย้อนหลังรายสัปดาห์</h1>
-                <p class="text-xs text-slate-400 mt-1">รายการไฟล์ CSV บันทึกสถิติประจำสัปดาห์</p>
+                <h1 class="text-xl font-bold text-cyan-400"><i class="fa-solid fa-chart-pie mr-2"></i>รายงานสรุปผลย้อนหลัง</h1>
+                <p class="text-xs text-slate-400 mt-1">รายการไฟล์ CSV บันทึกสถิติประจำวัน (24 ชม.) และสัปดาห์</p>
             </div>
             <a href="/" class="bg-slate-800 text-slate-200 px-4 py-2 rounded-xl text-xs font-bold border border-slate-700 hover:bg-slate-700 transition">
                 <i class="fa-solid fa-arrow-left mr-1.5"></i>กลับหน้าหลัก
@@ -1231,7 +1371,7 @@ SUMMARY_TEMPLATE = """
             <table class="w-full text-left text-xs font-mono">
                 <thead class="text-slate-400 uppercase text-[10px] border-b border-slate-800 bg-slate-950">
                     <tr>
-                        <th class="py-3 px-4">ชื่อไฟล์รายงาน CSV (รายสัปดาห์)</th>
+                        <th class="py-3 px-4">ชื่อไฟล์รายงาน CSV</th>
                         <th class="py-3 px-4 text-center">ดาวน์โหลด</th>
                     </tr>
                 </thead>
@@ -1246,7 +1386,7 @@ SUMMARY_TEMPLATE = """
                         </td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="2" class="text-center py-8 text-slate-500">ยังไม่มีไฟล์รายงานสรุปผลรายสัปดาห์ในระบบ</td></tr>
+                    <tr><td colspan="2" class="text-center py-8 text-slate-500">ยังไม่มีไฟล์รายงานสรุปผลในระบบ</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -1276,14 +1416,17 @@ GALLERY_TEMPLATE = """
                 <p class="text-xs text-slate-400 mt-1">ตัวกรองปัจจุบัน: <b class="text-white">{{ active_filter }}</b></p>
             </div>
             <div class="flex items-center gap-2 flex-wrap">
+                <button onclick="downloadSelectedImages()" class="bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/30 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer">
+                    <i class="fa-solid fa-file-arrow-down mr-1.5"></i>ดาวน์โหลดรูปที่เลือก (<span id="download-count">0</span>)
+                </button>
                 {% if session.get('role') == 'admin' %}
-                <button onclick="toggleSelectAll()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-700 transition">
+                <button onclick="toggleSelectAll()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-bold border border-slate-700 transition cursor-pointer">
                     <i class="fa-solid fa-check-double mr-1.5"></i>เลือกทั้งหมด
                 </button>
-                <button onclick="deleteSelectedImages()" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 px-3.5 py-2 rounded-xl text-xs font-bold transition">
+                <button onclick="deleteSelectedImages()" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 px-3.5 py-2 rounded-xl text-xs font-bold transition cursor-pointer">
                     <i class="fa-solid fa-trash-can mr-1.5"></i>ลบรูปที่เลือก (<span id="selected-count">0</span>)
                 </button>
-                <button onclick="deleteAllImages()" class="bg-rose-600 hover:bg-rose-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold transition shadow-lg">
+                <button onclick="deleteAllImages()" class="bg-rose-600 hover:bg-rose-700 text-white px-3.5 py-2 rounded-xl text-xs font-bold transition shadow-lg cursor-pointer">
                     <i class="fa-solid fa-dumpster-fire mr-1.5"></i>ลบทั้งหมด
                 </button>
                 {% endif %}
@@ -1302,15 +1445,22 @@ GALLERY_TEMPLATE = """
         <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {% for img in images %}
             <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden p-2 group relative">
-                {% if session.get('role') == 'admin' %}
                 <input type="checkbox" value="{{ img }}" onchange="updateSelectedCount()" class="img-checkbox absolute top-4 left-4 w-5 h-5 accent-cyan-500 z-10 cursor-pointer">
-                {% endif %}
-                <img src="/captures/{{ img }}" 
-                     onclick="openFullImageViewer('/captures/{{ img }}', '{{ img }}')" 
-                     class="w-full aspect-video object-cover rounded-xl group-hover:scale-105 transition duration-300 cursor-pointer shadow-md"
-                     title="คลิกเพื่อขยายดูรูปขนาดเต็ม">
-                <div class="p-2 text-[11px] text-slate-300 font-mono truncate" title="{{ img }}">
-                    {{ img }}
+                
+                <div class="relative overflow-hidden rounded-xl bg-black cursor-pointer" onclick="openLightbox('/captures/{{ img }}', '{{ img }}')">
+                    <img src="/captures/{{ img }}" class="w-full aspect-video object-cover rounded-xl group-hover:scale-105 transition duration-300 shadow-md">
+                    <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition duration-200 flex items-center justify-center text-white gap-2">
+                        <span class="bg-black/60 px-2.5 py-1 rounded-lg text-xs font-bold"><i class="fa-solid fa-magnifying-glass-plus mr-1"></i>ดูรูปใหญ่</span>
+                    </div>
+                </div>
+
+                <div class="p-2 flex items-center justify-between gap-1">
+                    <div class="text-[11px] text-slate-300 font-mono truncate flex-1" title="{{ img }}">
+                        {{ img }}
+                    </div>
+                    <a href="/captures/{{ img }}" download="{{ img }}" class="bg-slate-800 hover:bg-cyan-500/20 text-slate-300 hover:text-cyan-400 p-1.5 rounded-lg text-xs transition border border-slate-700" title="ดาวน์โหลดรูปนี้">
+                        <i class="fa-solid fa-download"></i>
+                    </a>
                 </div>
             </div>
             {% else %}
@@ -1319,58 +1469,97 @@ GALLERY_TEMPLATE = """
         </div>
     </div>
 
-    <!-- MODAL: FULL IMAGE VIEWER FOR GALLERY -->
-    <div id="gallery-image-modal" class="fixed inset-0 bg-black/90 backdrop-blur-md z-[70] hidden flex items-center justify-center p-4" onclick="closeFullImageViewer()">
-        <div class="bg-slate-900/90 border border-slate-800 max-w-4xl w-full rounded-3xl p-5 shadow-2xl relative flex flex-col items-center" onclick="event.stopPropagation()">
-            <div class="w-full flex justify-between items-center border-b border-slate-800 pb-3 mb-4">
-                <h3 id="gallery-image-title" class="text-sm font-mono font-bold text-cyan-400 truncate max-w-md">รูปภาพขนาดเต็ม</h3>
-                <button onclick="closeFullImageViewer()" class="text-slate-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+    <!-- LIGHTBOX MODAL -->
+    <div id="lightbox-modal" class="fixed inset-0 bg-black/90 backdrop-blur-md z-[100] hidden flex flex-col items-center justify-center p-4" onclick="closeLightbox()">
+        <div class="cyber-card max-w-4xl w-full rounded-3xl p-4 border border-slate-800 shadow-2xl relative flex flex-col items-center" onclick="event.stopPropagation()">
+            <div class="w-full flex justify-between items-center border-b border-slate-800 pb-3 mb-3">
+                <h3 id="lightbox-title" class="text-xs font-mono font-bold text-cyan-400 truncate">รูปภาพ</h3>
+                <div class="flex items-center gap-2">
+                    <a id="lightbox-download-btn" href="" download class="bg-cyan-500/20 hover:bg-cyan-500/40 text-cyan-300 border border-cyan-500/30 px-3 py-1 rounded-xl text-xs font-bold transition">
+                        <i class="fa-solid fa-download mr-1"></i>ดาวน์โหลด
+                    </a>
+                    <button onclick="closeLightbox()" class="text-slate-400 hover:text-white text-lg px-2"><i class="fa-solid fa-xmark"></i></button>
+                </div>
             </div>
-            <div class="w-full flex items-center justify-center max-h-[80vh] overflow-hidden rounded-2xl bg-black/70 border border-slate-800 p-2">
-                <img id="gallery-image-src" src="" class="max-w-full max-h-[75vh] object-contain rounded-xl shadow-2xl">
-            </div>
-            <div class="mt-4 flex gap-3">
-                <a id="gallery-image-download" href="" download class="px-5 py-2 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-xl text-xs font-bold transition flex items-center gap-1.5">
-                    <i class="fa-solid fa-download"></i> ดาวน์โหลดรูปภาพ
-                </a>
-                <button onclick="closeFullImageViewer()" class="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold border border-slate-700 transition">ปิด</button>
+            <div class="w-full flex items-center justify-center max-h-[75vh] overflow-hidden rounded-2xl bg-slate-950 p-2 border border-slate-800/80">
+                <img id="lightbox-img" src="" class="max-h-[70vh] max-w-full object-contain rounded-xl">
             </div>
         </div>
     </div>
 
     <script>
-        function openFullImageViewer(imgUrl, title) {
-            document.getElementById('gallery-image-src').src = imgUrl;
-            document.getElementById('gallery-image-title').innerText = title;
-            document.getElementById('gallery-image-download').href = imgUrl;
-            document.getElementById('gallery-image-modal').classList.remove('hidden');
+        let allSelected = false;
+
+        function openLightbox(src, title) {
+            document.getElementById('lightbox-img').src = src;
+            document.getElementById('lightbox-title').innerText = title;
+            document.getElementById('lightbox-download-btn').href = src;
+            document.getElementById('lightbox-download-btn').setAttribute('download', title);
+            document.getElementById('lightbox-modal').classList.remove('hidden');
         }
 
-        function closeFullImageViewer() {
-            document.getElementById('gallery-image-modal').classList.add('hidden');
-            document.getElementById('gallery-image-src').src = "";
+        function closeLightbox() {
+            document.getElementById('lightbox-modal').classList.add('hidden');
+            document.getElementById('lightbox-img').src = "";
         }
 
         function updateSelectedCount() {
             const checkboxes = document.querySelectorAll('.img-checkbox:checked');
-            const countEl = document.getElementById('selected-count');
-            if (countEl) countEl.innerText = checkboxes.length;
+            const count = checkboxes.length;
+            const selCountEl = document.getElementById('selected-count');
+            const dlCountEl = document.getElementById('download-count');
+            if (selCountEl) selCountEl.innerText = count;
+            if (dlCountEl) dlCountEl.innerText = count;
         }
 
         function toggleSelectAll() {
+            allSelected = !allSelected;
             const checkboxes = document.querySelectorAll('.img-checkbox');
-            const allChecked = Array.from(checkboxes).every(cb => cb.checked);
-            checkboxes.forEach(cb => cb.checked = !allChecked);
+            checkboxes.forEach(cb => cb.checked = allSelected);
             updateSelectedCount();
         }
 
-        function deleteSelectedImages() {
-            const selected = Array.from(document.querySelectorAll('.img-checkbox:checked')).map(cb => cb.value);
+        function getSelectedFilenames() {
+            const checkboxes = document.querySelectorAll('.img-checkbox:checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        function downloadSelectedImages() {
+            const selected = getSelectedFilenames();
             if (selected.length === 0) {
-                alert('กรุณาเลือกรูปภาพที่ต้องการลบอย่างน้อย 1 รูป');
+                alert('กรุณาติ๊กเลือกรูปภาพที่ต้องการดาวน์โหลดก่อน!');
                 return;
             }
-            if (!confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบรูปภาพจำนวน ${selected.length} รูปที่เลือก?`)) return;
+
+            fetch('/api/download_captures_zip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filenames: selected })
+            })
+            .then(res => {
+                if (!res.ok) throw new Error("เกิดข้อผิดพลาดในการดาวน์โหลด");
+                return res.blob();
+            })
+            .then(blob => {
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `captures_${new Date().toISOString().slice(0,10)}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            })
+            .catch(err => alert(err.message));
+        }
+
+        function deleteSelectedImages() {
+            const selected = getSelectedFilenames();
+            if (selected.length === 0) {
+                alert('กรุณาติ๊กเลือกรูปภาพที่ต้องการลบ!');
+                return;
+            }
+
+            if (!confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบรูปภาพจำนวน ${selected.length} รูป?`)) return;
 
             fetch('/api/delete_captures', {
                 method: 'POST',
@@ -1380,32 +1569,35 @@ GALLERY_TEMPLATE = """
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
-                    location.reload();
+                    window.location.reload();
                 } else {
-                    alert(data.message || 'เกิดข้อผิดพลาด');
+                    alert(data.message || 'เกิดข้อผิดพลาดในการลบรูป');
                 }
             });
         }
 
         function deleteAllImages() {
-            const allCheckboxes = Array.from(document.querySelectorAll('.img-checkbox')).map(cb => cb.value);
-            if (allCheckboxes.length === 0) {
-                alert('ไม่มีรูปภาพให้ลบ');
+            const allCheckboxes = document.querySelectorAll('.img-checkbox');
+            const allFiles = Array.from(allCheckboxes).map(cb => cb.value);
+
+            if (allFiles.length === 0) {
+                alert('ไม่มีรูปภาพให้ลบ!');
                 return;
             }
-            if (!confirm(`⚠️ คำเตือน: คุณต้องการลบรูปภาพทั้งหมด (${allCheckboxes.length} รูป) ในหน้านี้ใช่หรือไม่?`)) return;
+
+            if (!confirm(`⚠️ คำเตือน: คุณต้องการลบรูปภาพทั้งหมดจำนวน ${allFiles.length} รูปใช่หรือไม่?`)) return;
 
             fetch('/api/delete_captures', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filenames: allCheckboxes })
+                body: JSON.stringify({ filenames: allFiles })
             })
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
-                    location.reload();
+                    window.location.reload();
                 } else {
-                    alert(data.message || 'เกิดข้อผิดพลาด');
+                    alert(data.message || 'เกิดข้อผิดพลาดในการลบรูปภาพ');
                 }
             });
         }
@@ -1415,7 +1607,7 @@ GALLERY_TEMPLATE = """
 """
 
 # ==========================================
-# FACE MANAGEMENT API ROUTING
+# API ROUTING & AUTH
 # ==========================================
 @app.route("/raw_video_feed")
 def raw_video_feed():
@@ -1437,7 +1629,6 @@ def get_known_faces():
 def serve_known_face_img(filename):
     return send_from_directory(KNOWN_FACES_DIR, filename)
 
-# ENROLL SINGLE FACE PHOTO (SYNCED WITH FRONTEND SNAPSHOT)
 @app.route("/api/enroll_single_photo", methods=["POST"])
 @requires_auth
 @admin_only
@@ -1453,7 +1644,14 @@ def enroll_single_photo():
         return jsonify({"status": "error", "message": "กรุณากรอกชื่อผู้ใช้งาน"}), 400
 
     clean_name = secure_filename(name)
-    pose_names = ["Front (หน้าตรง)", "Left (มองซ้าย)", "Right (มองขวา)"]
+    
+    pose_names = [
+        "Frontal View (หน้าตรง)", 
+        "Left View (มองซ้าย)", 
+        "Right View (มองขวา)", 
+        "Tilt Up View (เงยหน้า)", 
+        "Tilt Down View (ก้มหน้า)"
+    ]
     pose_label = pose_names[index-1] if index <= len(pose_names) else f"Pose_{index}"
 
     success, frame = cam_stream.read()
@@ -1463,7 +1661,6 @@ def enroll_single_photo():
     fh, fw = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
-    # พยายามตรวจจับใบหน้า
     faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(50, 50))
 
     if len(faces) > 0:
@@ -1478,12 +1675,11 @@ def enroll_single_photo():
         y2 = min(fh, fy + f_h + pad_h)
         face_img = frame[y1:y2, x1:x2]
     else:
-        # Fallback หากก้มหรือหันมากไปจน Haar ไม่จับ ให้ตัดกรอบจากส่วนหัว/ลำตัวด้วย YOLO
         results = model(frame, classes=[PERSON_CLASS_ID], conf=0.2, verbose=False)
         if results and len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
             box = results[0].boxes[0]
             px1, py1, px2, py2 = map(int, box.xyxy[0].tolist())
-            head_h = int((py2 - py1) * 0.45) # ตัดเน้นช่วงหัวและช่วงบน
+            head_h = int((py2 - py1) * 0.45)
             face_img = frame[py1:min(fh, py1 + head_h), px1:px2]
         else:
             face_img = frame
@@ -1568,9 +1764,6 @@ def delete_face():
 
     return jsonify({"status": "error", "message": "ไม่พบไฟล์ในระบบ"}), 404
 
-# ==========================================
-# AUTH & SYSTEM ROUTING
-# ==========================================
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = None
@@ -1740,6 +1933,7 @@ def get_count():
             "all_captures_count": len(all_files),
             "line1_coords": line1_coords,
             "line2_coords": line2_coords,
+            "daily_stats": daily_stats,
             "weekly_stats": weekly_stats
         })
 
@@ -1748,9 +1942,6 @@ def get_visit_logs():
     with data_lock:
         return jsonify(visit_logs)
 
-# ==========================================
-# GALLERY & SUMMARY ROUTING
-# ==========================================
 @app.route("/gallery")
 @requires_auth
 def gallery():
@@ -1769,7 +1960,28 @@ def gallery():
 @app.route("/captures/<filename>")
 @requires_auth
 def serve_capture_image(filename):
-    return send_from_directory(SAVE_DIR, filename)
+    return send_from_directory(SAVE_DIR, filename, as_attachment=False)
+
+@app.route("/api/download_captures_zip", methods=["POST"])
+@requires_auth
+def download_captures_zip():
+    data = request.get_json()
+    filenames = data.get("filenames", [])
+
+    if not filenames:
+        return jsonify({"status": "error", "message": "ไม่ได้เลือกรูปภาพ"}), 400
+
+    memory_file = io.BytesIO()
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for fname in filenames:
+            safe_fname = secure_filename(fname)
+            filepath = os.path.join(SAVE_DIR, safe_fname)
+            if os.path.exists(filepath):
+                zf.write(filepath, safe_fname)
+
+    memory_file.seek(0)
+    zip_filename = f"captures_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    return send_file(memory_file, mimetype='application/zip', as_attachment=True, download_name=zip_filename)
 
 @app.route("/api/delete_captures", methods=["POST"])
 @requires_auth
@@ -1804,7 +2016,7 @@ def summary():
     reports = []
     if os.path.exists(REPORT_DIR):
         for item in sorted(os.listdir(REPORT_DIR), reverse=True):
-            if (item.startswith("weekly_summary_") or item.startswith("daily_summary_")) and item.endswith(".csv"):
+            if (item.startswith("person_summary_") or item.startswith("weekly_summary_") or item.startswith("daily_summary_")) and item.endswith(".csv"):
                 reports.append(item)
     return render_template_string(SUMMARY_TEMPLATE, reports=reports)
 
